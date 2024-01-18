@@ -19,6 +19,9 @@ import torch_harmonics as th
 from datetime import datetime
 from typing import Union
 from earth2mip.time_loop import TimeLoop
+import earth2mip.forecast_metrics_io
+import numpy as np
+import xarray as xr
 
 
 class GaussianRandomFieldS2(torch.nn.Module):
@@ -184,24 +187,33 @@ def generate_bred_vector(
     model: TimeLoop,
     noise_amplitude: torch.Tensor,
     time: Union[datetime, None] = None,
-    integration_steps: int = 40,
+    integration_steps: int = 30,
     inflate=False,
 ) -> torch.Tensor:
     # Assume x has shape [ENSEMBLE, TIME, CHANNEL, LAT, LON]
 
     if isinstance(noise_amplitude, float):
-        noise_amplitude = torch.tensor([noise_amplitude])
+        noise_amplitude = torch.tensor([0.01]).to(x.device)
 
     assert (noise_amplitude.shape[0] == x.shape[2]) or (
         torch.numel(noise_amplitude) == 1
     )
-
+    coslat = torch.Tensor(np.cos(np.deg2rad(np.linspace(90,-90,721)))[None, None, :, None]).to(x.device)
+    if np.asarray(model.grid.lat).shape[0] == 720:
+        coslat = coslat[:, :, :-1]
+    optimization_target = _load_optimal_targets('sfno_linear_73chq_sc3_layers8_edim384_wstgl2', 12).to(x.device).squeeze() / np.sqrt(2)  #/ model.scale.squeeze()
+    optimization_target = optimization_target[None, None]
     x0 = x[:1]
 
     # Get control forecast
-    for _, data, _ in model(time, x0):
+    num_steps = 0
+    iterator = model(time, x0, yield_initial=False)
+    #for _, data, _ in model(time, x0, yield_initial=False):
+    for _, data, _ in iterator:
         xd = data
-        break
+        num_steps += 1
+        if num_steps == 1:
+            break
 
     # Unsqueeze if time has been collapsed.
     if xd.ndim != x0.ndim:
@@ -210,19 +222,49 @@ def generate_bred_vector(
     dx = noise_amplitude[:, None, None] * torch.randn(
         x.shape, device=x.device, dtype=x.dtype
     )
+    #dx = dx * model.scale
+    dx = dx * torch.from_numpy(np.load("/pscratch/sd/j/jpathak/73var-6hourly/stats/time_means.npy").squeeze()).to(x.device)
+    #optimization_target = (dx * coslat).std((-1,-2)) / 10
     for _ in range(integration_steps):
         x1 = x + dx
-        for _, data, _ in model(time, x1):
+        num_steps = 0
+        iterator = model(time, x1, yield_initial=False)
+        #for _, data, _ in model(time, x1, yield_initial=False):
+        for _, data, _ in iterator:
             x2 = data
-            break
+            num_steps += 1
+            if num_steps == 1:
+                break
 
         # Unsqueeze if time has been collapsed.
         if x2.ndim != x1.ndim:
             x2 = x2.unsqueeze(1)
         dx = x2 - xd
+        #dx = normalize(x2, model.center, model.scale) - normalize(xd, model.center, model.scale)
 
         if inflate:
             dx += noise_amplitude * (dx - dx.mean(dim=0))
+    print(torch.linalg.norm(x, dim=(-1,-2)).shape)
+    return 0.1 * dx * torch.linalg.norm(x, dim=(-1,-2))[:, :, None, None] / torch.linalg.norm(x+dx, dim=(-1,-2))[:, :, None, None] / model.scale
+    exaggerate_factor = (dx * coslat).std((-1,-2)) / optimization_target
+    dx = dx / exaggerate_factor[:, :, :, None, None]
+    return dx / model.scale
 
-    gamma = torch.norm(x) / torch.norm(x + dx)
-    return noise_amplitude * dx * gamma
+def normalize(x, center, scale):
+    return (x - center)/ scale
+
+
+def TEMP_load_optimal_targets(config_model_name, lead_time):
+    path = "/pscratch/sd/a/amahesh/hens/optimal_perturbation_targets/{}.nc".format(config_model_name)
+    ds = earth2mip.forecast_metrics_io.read_metrics(path).to_xarray()
+    #ds = xr.open_dataset(path)
+    ds['lead_time'] = ds['lead_time'] / np.timedelta64(1, 'h')
+    da = (ds.sel(metric='mse')**0.5).mean('initial_time')
+    return torch.from_numpy(da.sel(lead_time=lead_time).values[np.newaxis,])
+
+def _load_optimal_targets(config_model_name, lead_time):  
+    path = "/pscratch/sd/a/amahesh/hens/optimal_perturbation_targets/{}.nc".format("FULL_sfno_73ch_e620_depth8_scale2_droppath01seed4_fcn-dev")
+    ds = xr.open_dataset(path)                                          
+    ds['lead_time'] = ds['lead_time'] / np.timedelta64(1, 'h')          
+    return torch.from_numpy(ds['rmse'].sel(lead_time=lead_time).values[np.newaxis,])
+
