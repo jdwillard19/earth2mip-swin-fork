@@ -1,4 +1,6 @@
-# Earth-2 MIP (Beta)
+# Earth-2 MIP Fork w/ Swin Transformer V2 implementation
+Forked from original repository: [\[Earth2Mip\]](https://github.com/NVIDIA/earth2mip)
+
 
 # Guide for running swin with earth2mip
 
@@ -45,12 +47,12 @@ Earth-2 MIP will be installable on PyPi upon general release.
 In the mean time, one can install from source:
 
 ```bash
-git clone git@github.com:NVIDIA/earth2mip.git
+git clone git@github.com:jdwillard19/earth2mip-swin-fork.git
 
-cd earth2mip && pip install .
+cd earth2mip-swin-fork && pip install .
 ```
 
-See [installation documentation](https://nvidia.github.io/earth2mip/userguide/install.html)
+See [installation documentation in original repository](https://nvidia.github.io/earth2mip/userguide/install.html)
 for more details and other options.
 
 ## Getting Started
@@ -117,89 +119,58 @@ Coordinates:
   * lead_time  (lead_time) timedelta64[ns] 0 days 00:00:00 ... 5 days 00:00:00
     channel    <U5 'z500'
 ```
+### Deterministic Scoring Example
+Deterministic scoring of a swin model can be done using the following workflow. 
+```
+from earth2mip import model_registry
+from earth2mip.inference_medium_range import score_deterministic
 
-### Supported Models
+registry = model_registry.ModelRegistry('/pscratch/sd/j/jwillard/FCN_exp/earth2mip_model_registry/')
+config_path = './config_swin.json'
+output_path = './outputs/output_folder/'
+h5_folder = "/pscratch/sd/p/pharring/73var-6hourly/staging/"
+time_mean = np.load('/pscratch/sd/p/pharring/73var-6hourly/staging/stats/time_means.npy')
+with open(config_path) as f:
+    config = json.load(f)
+registry = model_registry.ModelRegistry('/pscratch/sd/j/jwillard/FCN_exp/earth2mip_model_registry/')
+model = get_model(config['weather_model'], registry, device='cuda:0')
+datasource = hdf5.DataSource.from_path(
+    root=h5_folder, channel_names=model.channel_names
+)
 
-These notebooks illustrate how-to-use with a few models and this can serve as reference
-to bring in your own checkpoint as long as it's compatible. There may be additional work
-to make it compatible with Earth-2 MIP.
-Earth-2 MIP leverages the model zoo in [Modulus](https://github.com/NVIDIA/modulus) to
-provide a reference set of base-line models.
-The goal is to enable to community to grow this collection of models as shown in the
-table below.
+scores_swin = score_deterministic(model,
+    data_source=datasource,
+    n=28, #number of lead times
+    initial_times=initial_times,
+    output_directory=output_path,
+    time_mean=time_mean)
 
-<!-- markdownlint-disable -->
-| ID | Model | Architecture | Type | Reference | Source | Size |
-|:-----:|:-----:|:-------------------------------------------:|:--------------:|:---------:|:-------:|:---:|
-| fcn | FourCastNet | Adaptive Fourier Neural Operator  | global weather | [Arxiv](https://arxiv.org/abs/2202.11214)   | [modulus](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/models/modulus_fcn) | 300Mb |
-| dlwp |  Deep Learning Weather Prediction  |  Convolutional Encoder-Decoder | global weather |   [AGU](https://doi.org/10.1029/2020MS002109)   | [modulus](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/models/modulus_dlwp_cubesphere) |  50Mb |
-| pangu | Pangu Weather (Hierarchical 6 + 24 hr)  |  Vision Transformer | global weather |  [Nature](https://doi.org/10.1038/s41586-023-06185-3) | onnx | 2Gb |
-| pangu_6 | Pangu Weather 6hr Model  |  Vision Transformer | global weather |  [Nature](https://doi.org/10.1038/s41586-023-06185-3) | onnx | 1Gb |
-| pangu_24 | Pangu Weather 24hr Model |  Vision Transformer | global weather |  [Nature](https://doi.org/10.1038/s41586-023-06185-3) | onnx | 1Gb |
-| fcnv2_sm |  FourCastNet v2 | Spherical Harmonics Fourier Neural Operator | global weather |  [Arxiv](https://arxiv.org/abs/2306.03838)  | [modulus](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/models/modulus_fcnv2_sm) | 3.5Gb |
-| graphcast |  Graphcast, 37 levels, 0.25 deg | Graph neural network | global weather |  [Science](https://www.science.org/doi/10.1126/science.adi2336)  | [github](https://github.com/google-deepmind/graphcast) | 145MB |
-| graphcast_small |  Graphcast, 13 levels, 1 deg | Graph neural network | global weather |  [Science](https://www.science.org/doi/10.1126/science.adi2336)  | [github](https://github.com/google-deepmind/graphcast) | 144MB |
-| graphcast_operational |  Graphcast, 13 levels, 0.25 deg| Graph neural network | global weather |  [Science](https://www.science.org/doi/10.1126/science.adi2336)  | [github](https://github.com/google-deepmind/graphcast) | 144MB |
-| precipitation_afno | FourCastNet Precipitation | Adaptive Fourier Neural Operator  | diagnostic | [Arxiv](https://arxiv.org/abs/2202.11214)   | [modulus](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/models/modulus_diagnostics) | 300Mb |
-| climatenet | ClimateNet Segmentation Model | Convolutional Neural Network | diagnostic | [GMD](https://doi.org/10.5194/gmd-14-107-2021)   | [modulus](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/modulus/models/modulus_diagnostics) | 2Mb |
-<!-- markdownlint-enable -->
+```
+### Generating Forecasts Example
+Once you've created a registry folder and a folder with ERA5 data, you can generate and save a set of forecasts by doing the following workflow. This can be parallelized for better efficiency if more than one GPU is available. 
 
-\* = coming soon
+```
+from earth2mip import model_registry
+registry = model_registry.ModelRegistry('/pscratch/sd/j/jwillard/FCN_exp/earth2mip_model_registry/')
+model = model_registry.get_model(config_tmp['weather_model'], registry, device=device)
+time = datetime.datetime(2018, 1, 1, 0)
+initial_times = [time + datetime.timedelta(hours=12 * i) for i in range(730)]
 
-Some models require additional dependencies not installed by default.
-Refer to the [installation instructions](https://nvidia.github.io/earth2mip/userguide/install.html)
-for details.
+datasource = hdf5.DataSource.from_path(
+    root=h5_folder, channel_names=model.channel_names
+)
 
-*Note* : Each model checkpoint may have its own unique license. We encourage users to
-familiarize themselves with each to understand implications for their particular use
-case.
-
-We want to integrate your model into the scoreboard to show the community!
-The best way to do this is via [NVIDIA Modulus](https://github.com/NVIDIA/modulus).
-You can contribute your model (both the training code as well as model checkpoint) and
-we can ensure that it is maintained as part of the reference set.
-
-## Contributing
-
-Earth-2 MIP is an open source collaboration and its success is rooted in community
-contribution to further the field.
-Thank you for contributing to the project so others can build on your contribution.
-For guidance on making a contribution to Earth-2 MIP, please refer to the
-[contributing guidelines](./CONTRIBUTING.md).
-
-## More About Earth-2 MIP
-
-This work is inspired to facilitate similar engagements between teams here at
-NVIDIA - the ML experts developing new models and the domain experts in Climate science
-evaluating the skill of such models.
-For instance, often necessary input data such as normalization constants and
-hyperparameter values are not packaged alongside the model weights.
-Every model typically implements a slightly different interface. Scoring routines are
-specific to the model being scored and may not be consistent across groups.
-
-Earth-2 MIP addresses  these challenges and bridges the gap between the domain experts
-who most often are assessing ML models, and the ML experts producing them.
-Compared to other projects in this space, Earth-2 MIP focuses on scoring models
-on-the-fly.
-It has python APIs suitable for rapid iteration in a jupyter book, CLIs for scoring
-models distributed over many GPUs, and a flexible
-plugin framework that allows anyone to use their own ML models.
-More importantly Earth-2 MIP aspires to facilitate exploration and collaboration within
-the climate research community to evaluate the potential of AI models in climate and
-weather simulations.
-
-Please see the [documentation page](https://nvidia.github.io/earth2mip/) for in depth
-information about Earth-2 MIP, functionality, APIs, etc.
-
-## Communication
-
-- Github Discussions: Discuss new ideas, model integration, support etc.
-- GitHub Issues: Bug reports, feature requests, install issues, etc.
-
-## License
-
-Earth-2 MIP is provided under the Apache License 2.0, please see
-[LICENSE.txt](./LICENSE.txt) for full license text.
+time_mean = np.load('/pscratch/sd/p/pharring/73var-6hourly/staging/stats/time_means.npy')
+config_path = './config_swin.json'
+output_path = './outputs/output_folder/'
+with open(config_path) as f:
+    config = json.load(f)
+config = EnsembleRun.parse_obj(config)
+run_over_initial_times(time_loop=model, data_source=datasource, 
+                    initial_times=initial_times, 
+                    config=config, output_path=output_path, 
+                    shard=1,n_shards=1, score=False)
+```
 
 ### Additional Resources
 
